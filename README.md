@@ -3,7 +3,7 @@
 ## Overview:
  This project contains an identity server and client. The client can connect to the server and submit
  account requests. The set of commands that are supported can be seen below. 
- ```
+```
  --create <loginname> [<real name>] [--password <password>]
  --lookup <loginname>
  --reverse-lookup <UUID>
@@ -59,20 +59,20 @@
      DatabaseManager.java            SOURCE                              Represents a client
      IdentityServerInterface.java    Interface
      User.java                       Source
-    ```
+```
 ## Building the project
  This project uses Maven for compiling and running.
 
  To compile this project go to project root and run
- ```
+```
  make
- ```
+```
  After the .java files have been compiled you can start the server by running (This will default to run on port 5156)
- ```
+```
  make runserver
- ```
+```
  To run the server in verbose mode run
- ```
+```
  make debug
 ```
  If you would like to specify a port rather than 5156 run the server with the following command
@@ -81,7 +81,7 @@
 ```
  The client can be run using the following command from the project root directory
  (Defaults to localhost:5156 if no --server or --numport options are specified)
- ```
+```
  java -jar target/IdClient.jar <args>
 ```
 
