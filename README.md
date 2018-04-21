@@ -94,7 +94,7 @@
     server, and verify their results. We also did manual testing for the shutdown hook, testing that our server saves
     its state. We also manually tested the server across onyx.
 
-    Our name generator is pretty fun try using --get all to see some of the random names that were generated. Names are
+    Our name generator is pretty fun. Try using --get all to see some of the random names that were generated. Names are
     generated as Adjective Noun pairs
 
 
