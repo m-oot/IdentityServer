@@ -1,0 +1,9 @@
+#ignore intellij files
+/.idea
+/*/.idea/
+
+#ignore generated target files
+/*/target
+
+#i dont want this file
+*.iml

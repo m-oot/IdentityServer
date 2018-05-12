@@ -9,7 +9,7 @@ runserver:
 	java -jar target/IdServer.jar
 
 debug:
-	java -jar target/IdServer.jar --verbose
+	java -jar target/IdServer.jar --verbose --numport ${ARGS}
 
 runclient:
 	java -jar target/IdClient.jar --get all
