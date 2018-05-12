@@ -40,6 +40,27 @@ public class Database {
     }
 
     /**
+     * Creates all required tables with the proper schema for the database
+     *
+     * returns true if setup was successful, false if setup failed.
+     */
+    public boolean setUp() {
+        String createUsers = "CREATE TABLE users (uuid text, name string, date date, passHash varChar(512), realName string, ipAddress string, stamp integer, deleted int, primary key (uuid));";
+        String createTimeStamp = "CREATE TABLE serverinfo (serverID integer, commitstate int, primary key (serverID));";
+        String insertFirstTimeStamp = "Insert into serverinfo values (-1,0);";
+        try {
+            Statement stmt = conn.createStatement();
+            stmt.execute(createUsers);
+            stmt.execute(createTimeStamp);
+            stmt.execute(insertFirstTimeStamp);
+            return true;
+        } catch (SQLException e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
      * Closes database handler
      */
     public void close() {
@@ -53,6 +74,86 @@ public class Database {
     }
 
     /**
+     * Sets the servers ID
+     * @return 1 if successful, -1 if not successful
+     */
+    public int setServerID(int serverID){
+        try {
+            PreparedStatement stmt = conn.prepareStatement("update serverinfo set serverID = ?;");
+            stmt.setInt(1,serverID);
+            stmt.execute();
+        } catch (SQLException e) {
+            log.severe("Error in setServerID:\n" + e.getStackTrace());
+            return -1;
+        }
+        return 1;
+    }
+
+    public int setCommitState(int state) {
+        try {
+            PreparedStatement stmt = conn.prepareStatement("update serverinfo set commitstate = ?;");
+            stmt.setInt(1,state);
+            stmt.execute();
+        } catch (SQLException e) {
+            e.printStackTrace();
+            log.severe("Error in setServerID:\n" + e.getStackTrace());
+            return -1;
+        }
+        return 1;
+    }
+
+    /**
+     * Gets the serverID
+     * @return serverID, or -1 if no previous serverID
+     */
+    public int getServerID(){
+        Integer serverID = -1;
+        try {
+            Statement statement = conn.createStatement();
+            ResultSet rs = statement.executeQuery("select serverID from serverinfo;");
+            serverID = rs.getInt("serverID");
+        } catch (SQLException e) {
+            e.printStackTrace();
+            log.severe("Error in getServerID:\n" + e.getStackTrace());
+        }
+        return serverID;
+    }
+
+    /**
+     * Gets the serverID
+     * @return serverID, or -1 if no previous serverID
+     */
+    public int getCommitState(){
+        Integer commitState = -1;
+        try {
+            Statement statement = conn.createStatement();
+            ResultSet rs = statement.executeQuery("select commitstate from serverinfo;");
+            commitState = rs.getInt("commitstate");
+        } catch (SQLException e) {
+            e.printStackTrace();
+            log.severe("Error in getServerID:\n" + e.getStackTrace());
+        }
+        return commitState;
+    }
+
+    /**
+     * Gets the last stored logical time stamp
+     * @return last know stamp
+     */
+    public int getLogicalStamp(){
+        Integer stamp = 0;
+        try {
+            Statement statement = conn.createStatement();
+            ResultSet rs = statement.executeQuery("select max(stamp) from users;");
+            stamp = rs.getInt("stamp");
+        } catch (SQLException e) {
+            log.severe("Error in getLogicalStamp:\n" + e.getStackTrace());
+        }
+        return stamp;
+    }
+
+
+    /**
      * Return a list of all users in the database
      * @return list of all users
      */
@@ -62,8 +163,10 @@ public class Database {
             Statement statement = conn.createStatement();
             ResultSet rs = statement.executeQuery("select * from users;");
             while(rs.next()) {
+                if(rs.getInt("deleted") == 1) continue;
                 User u = new User(rs.getString("uuid"),rs.getString("name"),rs.getString("realName"),rs.getString("passHash"),rs.getString("ipAddress"));
                 u.setDate(rs.getTimestamp("date"));
+                u.setLstamp(rs.getInt("stamp"));
                 users.add(u);
 
             }
@@ -85,7 +188,9 @@ public class Database {
             stmt.setString(1,uuid);
             ResultSet rs = stmt.executeQuery();
             while(rs.next()) {
+                if(rs.getInt("deleted") == 1) return user;
                 user = new User(rs.getString("uuid"),rs.getString("name"),rs.getString("realName"));
+                user.setLstamp(rs.getInt("stamp"));
                 user.setDate(rs.getTimestamp("date"));
             }
         } catch (SQLException e) {
@@ -107,6 +212,7 @@ public class Database {
             ResultSet rs = stmt.executeQuery();
             while(rs.next()) {
                 user = new User(rs.getString("uuid"),rs.getString("name"),rs.getString("realName"));
+                user.setLstamp(rs.getInt("stamp"));
                 user.setDate(rs.getTimestamp("date"));
             }
         } catch (SQLException e) {
@@ -136,16 +242,24 @@ public class Database {
 
             ResultSet rs = stmt.executeQuery();//statement.executeQuery("select * from users where name = '" + username + "';");
             if (rs.next()) {
-                log.severe("Error in createNewUser: loginname is already taken\n");
-                return -2; //The query should be empty and rs.next() should return false
+                if(rs.getInt("deleted") == 1) {
+                    stmt = conn.prepareStatement("delete from users where name = ?");
+                    stmt.setString(1,user.getName());
+                    stmt.execute();
+                } else {
+                    log.severe("Error in createNewUser: loginname is already taken\n");
+                    return -2; //The query should be empty and rs.next() should return false
+                }
             }
-            stmt = conn.prepareStatement("insert into users values (?,?,?,?,?,?);");
+            stmt = conn.prepareStatement("insert into users values (?,?,?,?,?,?,?,?);");
             stmt.setString(1,user.getUuid());
             stmt.setString(2,user.getName());
             stmt.setDate(3,sqlDate);
             stmt.setString(4,user.getPassHash());
             stmt.setString(5,user.getRealname());
             stmt.setString(6,user.getIpAddress());
+            stmt.setInt(7,user.getLstamp());
+            stmt.setInt(8,0); //Zero means the user is not deleted
             stmt.execute();
 
         } catch (SQLException e) {
@@ -169,8 +283,9 @@ public class Database {
     public synchronized int deleteUser(User user) {
         try {
             String uuid = user.getUuid();
-            PreparedStatement stmt = conn.prepareStatement("delete from users where uuid = ?;");
-            stmt.setString(1,uuid);
+            PreparedStatement stmt = conn.prepareStatement("update users set deleted = 1, stamp = ? where uuid = ?;");
+            stmt.setInt(1,user.getLstamp());
+            stmt.setString(2,uuid);
             stmt.execute();
         } catch (SQLException e) {
             log.severe("Error in deleteUser:\n" + e.getStackTrace());
@@ -184,8 +299,9 @@ public class Database {
      * @param uuid
      * @return success code
      */
-    public int deleteUserByUUID(String uuid) {
+    public int deleteUserByUUID(String uuid, int stamp) {
         User user = new User(uuid);
+        user.setLstamp(stamp);
         return deleteUser(user);
     }
 
@@ -195,11 +311,12 @@ public class Database {
      * @param newName
      * @return 1 if successful, -1 if sql error
      */
-    public int changeUserName(String UUID, String newName) {
+    public int changeUserName(String UUID, String newName, int lStamp) {
         try {
-            PreparedStatement stmt = conn.prepareStatement("update users set name = ? where uuid = ? ;");
+            PreparedStatement stmt = conn.prepareStatement("update users set name = ?, stamp = ?, where uuid = ? ;");
             stmt.setString(1,newName);
-            stmt.setString(2,UUID);
+            stmt.setInt(2,lStamp);
+            stmt.setString(3,UUID);
             stmt.execute();
         } catch (SQLException e) {
             log.severe("Error in changeUserName:\n" + e.getStackTrace());

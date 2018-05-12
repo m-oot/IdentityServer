@@ -14,6 +14,7 @@ public class User implements Serializable {
     private transient String passHash;
     private transient String ipAddress;
     private String realname;
+    private int lstamp; //Lamport stamp of the last action that updated this user
 
     /**
      * Default Constructor, does not initialize any values.
@@ -61,6 +62,14 @@ public class User implements Serializable {
         this.passHash = passHash;
         this.realname = realname;
         this.ipAddress = ipAddress;
+    }
+
+    public int getLstamp() {
+        return lstamp;
+    }
+
+    public void setLstamp(int lstamp) {
+        this.lstamp = lstamp;
     }
 
     public String getIpAddress() {

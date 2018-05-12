@@ -1,21 +1,25 @@
 package Identity.Client;
 
-import Identity.Server.IdServer;
+import Identity.Server.*;
 
-import static org.kohsuke.args4j.ExampleMode.ALL; //Command line parsing
-
-import Identity.Server.IdentityServerInterface;
-import Identity.Server.User;
 import org.kohsuke.args4j.Argument;
 import org.kohsuke.args4j.CmdLineException;
 import org.kohsuke.args4j.CmdLineParser;
 import org.kohsuke.args4j.Option;
+import org.kohsuke.args4j.spi.StringArrayOptionHandler;
 
 import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.rmi.NotBoundException;
 import java.rmi.RemoteException;
 import java.rmi.registry.*;
+import java.rmi.Remote;
+import java.rmi.server.RMISocketFactory;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.*;
 
 /**
  *A client that can execute RMI commands with the Identity Server
@@ -26,93 +30,71 @@ import java.util.List;
  * @author Alex Mussell
  */
 public class IdClient{
+    /**
+     * Arguments
+     */
+    @Option(name="--testing")
+    private boolean testing;
+    @Option(name="--server", aliases="-s", handler = StringArrayOptionHandler.class)
+    private List<String> serverList = new ArrayList<String>();
+    //private String host = "localhost";
+    @Option(name="--numport", aliases ="-n")
+    private int registryPort = 5156;
+    @Option(name="--password",aliases ="-p",usage="[--password <password>]")
+    private String password = null;
+    @Option(name="--create",aliases ="-c",usage="--create <loginname> [<real name>] [--password <password>]")
+    private boolean create;
+    @Option(name="--lookup",aliases="-l",usage="--lookup <loginname>")
+    private boolean lookup;
+    @Option(name="--reverse-lookup",aliases="-r",usage="-reverse-lookup <UUID>")
+    private boolean reverseLookup;
+    @Option(name="--modify",aliases="-m",usage="-modify <oldloginname> <newloginname> [--password <password>")
+    private boolean modify;
+    @Option(name="--delete",aliases="-d",usage="--delete <loginname> [--password <password>]")
+    private boolean delete;
+    @Option(name="--get",aliases="-g",usage="--get users|uuids|all")
+    private boolean get;
+    @Option(name="--dbsh",usage="--dbsh")
+    private String debugServerHost = null;
+    @Option(name="--dbsp",usage="--dbsp")
+    private int debugServerPort = -1;
+    @Option(name="--kill",usage="--kill")
+    private boolean kill;
+    @Argument
+    private List<String> arguments = new ArrayList<String>();    // receives other command line parameters than options
 
     IdentityServerInterface remObj;
+    Logger log;
+    String debugServerChannel = "dbserverchannel";
+
+
+    public static void main(String[] args) throws IOException{
+        IdClient client = new IdClient(args);
+    }
 
     /**
      * Default constructor
      */
-    public IdClient() {
-        System.setProperty("javax.net.ssl.trustStore", "../Client_Truststore");
-        System.setProperty("java.security.policy", "mysecurity.policy");
+    public IdClient(String[] args) throws IOException {
+        System.setProperty("javax.net.ssl.trustStore", "Security/Client_Truststore");
+        System.setProperty("java.security.policy", "Security/mysecurity.policy");
+        log = new Logger();
+        run(args);
+        if(debugServerHost != null && debugServerPort != -1) log.addServerChannel(debugServerChannel,debugServerHost,debugServerPort);
+//        execute();
         /* System.setSecurityManager(new RMISecurityManager()); */
     }
 
     /**
-     * Gets the remote object
-     */
-    public void getRemoteObject(){
-        try {
-            Registry registry = LocateRegistry.getRegistry(host, registryPort);
-            remObj = (IdentityServerInterface) registry.lookup("IdServer");
-
-        } catch (java.rmi.NotBoundException e) {
-            System.err.println("RMI endpoint not bound: " + e);
-            System.exit(2);
-        } catch (java.rmi.RemoteException e) {
-            System.err.println("RMI RemoteException: " + e);
-            System.exit(2);
-        }
-    }
-
-    /**
-     * ==================================================
-     * Arguments
-     * ==================================================
-     */
-    @Option(name="--testing")
-    private boolean testing;
-
-    @Option(name="--server", aliases="-s")
-    private String host = "localhost";
-
-    @Option(name="--numport", aliases ="-n")
-    private int registryPort = 5156;
-
-    @Option(name="--password",aliases ="-p",usage="[--password <password>]")
-    private String password = null;
-
-    @Option(name="--create",aliases ="-c",usage="--create <loginname> [<real name>] [--password <password>]")
-    private boolean create;
-
-    @Option(name="--lookup",aliases="-l",usage="--lookup <loginname>")
-    private boolean lookup;
-
-    @Option(name="--reverse-lookup",aliases="-r",usage="-reverse-lookup <UUID>")
-    private boolean reverseLookup;
-
-    @Option(name="--modify",aliases="-m",usage="-modify <oldloginname> <newloginname> [--password <password>")
-    private boolean modify;
-
-    @Option(name="--delete",aliases="-d",usage="--delete <loginname> [--password <password>]")
-    private boolean delete;
-
-    @Option(name="--get",aliases="-g",usage="--get users|uuids|all")
-    private boolean get;
-
-    // receives other command line parameters than options
-    @Argument
-    private List<String> arguments = new ArrayList<String>();
-
-    /**
-     * ===================================================
-     *Runs client
-     * ===================================================
+     * Runs client
      */
     public int run(String[] args) throws IOException {
         CmdLineParser parser = new CmdLineParser(this);
 
         try {
-            // parse the arguments.
             parser.parseArgument(args);
-
-            if( arguments.isEmpty() )
-                throw new CmdLineException(parser,"No argument is given");
-
+            if( arguments.isEmpty() && !kill) throw new CmdLineException(parser,"No argument is given");
         } catch( CmdLineException e ) {
-            // if there's a problem in the command line,
-            // you'll get this exception. this will report
-            // an error message.
             System.err.println(e.getMessage());
             System.err.println("java IdClient <serverhost> [--port <port#>] <query>");
             // print the list of available options
@@ -125,164 +107,290 @@ public class IdClient{
             return -1;
         }
 
-        //Now we can get the remote object after parsing the arguments
-        getRemoteObject();
+        //Establish an RMI connection with an identity server
+        connectToIdentityServer();
 
-        /**
-         * Creates a user
-         */
-        if(create) {
-            return create();
-
-        }
-
-        /**
-         * Looks up a user based off login name
-         */
-        if(lookup) {
-            return lookup();
-        }
-
-
-        /**
-         * Looks up a user based off a uuid
-         */
-        if(reverseLookup) {
-            return reverseLookup();
-        }
-
-        /**
-         * Modifies the current login name to the newly specified login name.
-         */
-        if(modify) {
-            return modify();
-        }
-
-        /**
-         * Deletes a user based off of a user name
-         */
-        if(delete) {
-            return delete();
-        }
-
-        /**
-         * Obtains either a list all login names,  list of all UUIDs
-         * or a list of user,  UUID and string description all accounts
-         */
-        if(get) {
-            return get();
-        }
-
-        return -1;
+        return 1;
 
     }
 
+    private int execute() throws IOException {
+        //Execute one of the commands
+        if(create) return create();
+        if(lookup) return lookup();
+        if(reverseLookup)  return reverseLookup();
+        if(modify) return modify();
+        if(delete) return delete();
+        if(get) return get();
+        if(kill) return kill();
+
+        return -1; //A command was not executed so return -1
+    }
+
+
+
+    /**
+     * Gets the remote object
+     */
+    public void connectToIdentityServer(){
+        boolean connected = false;
+        setRmiTimeout(1000);
+
+        ArrayList<ServerInfo> knownServers = getKnownServers(); //Getting list of servers from file and command line arguments
+
+        //Looping through known servers trying to make a connection
+        for(ServerInfo server : knownServers){
+            try {
+                //Creating executor to connect to server
+                ExecutorService executor2 = Executors.newSingleThreadExecutor();
+                Callable<Object> task2 = new Callable<Object>() {
+                    public Object call() throws IOException, NotBoundException {
+                        return (remObj = (IdentityServerInterface) getRMIRemoteConnection("IdServer",server));
+                    }
+                };
+                Future<Object> future2 = executor2.submit(task2);
+                remObj = (IdentityServerInterface) future2.get(2, TimeUnit.SECONDS);
+                connected = true;
+
+                //Creating executor to execute request
+                ExecutorService executor = Executors.newSingleThreadExecutor();
+                Callable<Object> task = new Callable<Object>() {
+                    public Object call() throws IOException {
+                        return execute();
+                    }
+                };
+                Future<Object> future = executor.submit(task);
+                Object result = future.get(2, TimeUnit.SECONDS);
+                System.exit(1);
+                break;
+            }
+            catch (InterruptedException e) {
+            } catch (ExecutionException e) {
+            } catch (TimeoutException e) {
+            }
+        }
+
+        System.out.println("Timeout error.");
+        System.exit(0);
+        //Shuts the client down if no connection has been made
+        if(!connected) {
+            System.out.print("Unable to connect to any known server. Shutting down.");
+            System.exit(1);
+        }
+
+    }
+
+    private void setRmiTimeout(int timeoutMilliseconds) {
+        try {
+            RMISocketFactory.setSocketFactory(new RMISocketFactory()
+            {
+                public Socket createSocket(String host, int port ) throws IOException {
+                    Socket socket = new Socket();
+                    socket.setSoTimeout( timeoutMilliseconds );
+                    socket.setSoLinger( false, 0 );
+                    socket.connect( new InetSocketAddress( host, port ), timeoutMilliseconds );
+                    return socket;
+                }
+                public ServerSocket createServerSocket(int port ) throws IOException {
+                    return new ServerSocket( port );
+                }
+            } );
+        } catch (IOException e) {
+        }
+    }
+
+    public ArrayList<ServerInfo> getKnownServers() {
+        ArrayList<ServerInfo> knownServers = new ArrayList<>();
+        for(String server : serverList){
+            knownServers.add(0,new ServerInfo(server, registryPort));
+        }
+        ServerAddressParser fileParser = new ServerAddressParser("KnownServers.txt");
+        knownServers.addAll(fileParser.getServerInfo());
+        return knownServers;
+    }
+
+    public Remote getRMIRemoteConnection(String serviceName, ServerInfo server) throws NotBoundException, RemoteException {
+        //log.logClient(debugServerChannel,"Trying to connect with " + server);
+        Registry registry = LocateRegistry.getRegistry(server.getHostIpAddress(), server.getRegistryPort());
+        Remote remObj = registry.lookup(serviceName);
+        //log.logClient(debugServerChannel,"connected with " + server.getHostIpAddress());
+        return remObj;
+    }
+
+    public int kill() {
+        try {
+            remObj.kill();
+            return 1;
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+        return -1;
+    }
+
+
+
+    /**
+     * Creates a new user
+     * @return success code
+     * @throws RemoteException
+     */
     public int create() throws RemoteException {
         String realName = System.getProperty("user.name");
         String loginName = arguments.get(0);
 
         if (arguments.size() == 2){ realName = arguments.get(1);}
         if (password != null){ password = SHA2.trySHA(password);}
+        User u = null;
+        try {
+            log.logClient(debugServerChannel,"Trying to create " + loginName);
+            u = remObj.create(loginName, realName, password);
+        } catch (PartitionedException e) {
+            log.logClient(debugServerChannel,"System is partitioned. Unable to complete request.");
+            System.exit(1);
+        }
 
-        User u = remObj.create(loginName, realName, password);
         int successCode = (u == null) ? -1 : 1;
         if (!testing){
             if(successCode == 1){
-                System.out.println("Successful login created: " + u.getUuid());
+                log.logClient(debugServerChannel,"Successful login created: " + u.getUuid());
             } else{
-                System.out.println("User cannot be created with that information.");
+                log.logClient(debugServerChannel,"User cannot be created with that information.");
             }
         }
         return successCode;
     }
 
+    /**
+     * Looks up user by login name
+     * @return success code
+     * @throws RemoteException
+     */
     public int lookup() throws RemoteException {
-        if (!testing)System.out.println("Looking up " + arguments.get(0));
+        if (!testing)log.logClient(debugServerChannel,"Looking up " + arguments.get(0));
+        User u = null;
+        try {
+            u = remObj.lookup(arguments.get(0));
+        } catch (RemoteException e){
+            System.out.println("Unable to fulfill request at this moment.");
+        }
 
-        User u = remObj.lookup(arguments.get(0));
         int successCode = (u == null) ? -1 : 1;
         if (!testing) {
             String result = (u == null) ? "No user with that login name" : u.publicString();
-            System.out.println("Returned result: " + result);
+            log.logClient(debugServerChannel,"Returned result: " + result);
         }
         return successCode;
     }
 
+    /**
+     * Looks up user by uuid
+     * @return success code
+     * @throws RemoteException
+     */
     public int reverseLookup() throws RemoteException {
-        User u = remObj.reverseLookup(arguments.get(0));
+        User u = null;
+        try {
+            log.logClient(debugServerChannel,"Looking up " + arguments.get(0));
+            u = remObj.reverseLookup(arguments.get(0));
+        } catch (RemoteException e){
+            System.out.println("Unable to fulfill request at this moment.");
+        }
+
         String result = (u == null) ? "No user with that uuid" : u.publicString();
         int successCode = (u == null) ? -1 : 1;
-        if (!testing)System.out.println(result);
+        if (!testing)log.logClient(debugServerChannel,result);
         return successCode;
     }
 
+    /**
+     * Modifies a users name
+     * @return
+     * @throws RemoteException
+     */
     public int modify() throws RemoteException {
         String oldLoginName = arguments.get(0);
         String newLoginName = arguments.get(1);
 
         if (password != null) password = SHA2.trySHA(password);
 
-        int r = remObj.modify(oldLoginName, newLoginName, password);
+        int r = -1;
+        try {
+            log.logClient(debugServerChannel,"Trying to change " + oldLoginName + " to " + newLoginName);
+            r = remObj.modify(oldLoginName, newLoginName, password);
+        } catch (PartitionedException e) {
+            log.logClient(debugServerChannel,"System is partitioned. Unable to complete request.");
+            System.exit(1);
+        }
 
         if (!testing){
             if(r == -2){
-                System.out.println("Thats not the right password...");
+                log.logClient(debugServerChannel,"Thats not the right password...");
             } else if (r == -1){
-                System.out.println("There was no user with that login name");
+                log.logClient(debugServerChannel,"There was no user with that login name");
             }else{
-                System.out.println(oldLoginName + " has been changed to  " + newLoginName);
+                log.logClient(debugServerChannel,oldLoginName + " has been changed to  " + newLoginName);
             }
         }
         return r;
     }
 
+    /**
+     * Deletes a user
+     * @return success code
+     * @throws RemoteException
+     */
     public int delete() throws RemoteException {
         String userToDelete = arguments.get(0);
 
         if (password != null){ password = SHA2.trySHA(password);}
 
-        int r = remObj.delete(userToDelete, password);
+        int r = -1;
+        try {
+            log.logClient(debugServerChannel,"Deleting " + arguments.get(0));
+            r = remObj.delete(userToDelete, password);
+        } catch (PartitionedException e) {
+            log.logClient(debugServerChannel,"System is partitioned. Unable to complete request.");
+            System.exit(1);
+        }
 
         if (!testing){
             if (r ==1 ){
-                System.out.println("Successfully deleted user.");
+                log.logClient(debugServerChannel,"Successfully deleted user.");
             } else if (r  == - 2){
-                System.out.println("Oops. That's not the right password. Are you sure this is your login...?");
+                log.logClient(debugServerChannel,"Oops. That's not the right password. Are you sure this is your login...?");
             } else{
-                System.out.println("Are you sure you know what you are doing?");
+                log.logClient(debugServerChannel,"Are you sure you know what you are doing?");
             }
         }
         return r;
     }
 
+    /**
+     * Obtains either a list all login names,  list of all UUIDs
+     * or a list of user,  UUID and string description all accounts
+     * @return success code
+     * @throws RemoteException
+     */
     public int get() throws RemoteException {
-        List<String> result = remObj.get(arguments.get(0));
+        System.out.println(arguments.get(0));
+        List<String> result = null;
+        try{
+            result = remObj.get(arguments.get(0));
+        } catch(RemoteException e){
+            System.out.println("Unable to fulfill request at this moment.");
+        }
+
         if (!testing){
             if( result != null){
-                System.out.println("Results:");
+                log.logClient(debugServerChannel,"Results:");
                 for(String res : result)
-                System.out.println(res);
+                    log.logClient(debugServerChannel,res);
             } else{
-                System.out.println("Oops. What are you trying to do? Did you read the instructions?");
+                log.logClient(debugServerChannel,"Oops. What are you trying to do? Did you read the instructions?");
                 return -1;
             }
         }
         return result.size();
-    }
-
-    //Used for testing
-    public String toString(){
-        return "host: " + host + " port: " + registryPort;
-    }
-
-    /**
-     * Starts the IdentityClient
-     * ===================================================
-     * ===================================================
-     */
-    public static void main(String[] args) throws IOException{
-        IdClient client = new IdClient();
-        client.run(args);
     }
 
     /**
@@ -291,9 +399,9 @@ public class IdClient{
      * @return 1 if test passed, -1 if failed
      */
     public static int test(String[] args){
-        IdClient client = new IdClient();
         try {
-            return client.run(args);
+            IdClient client = new IdClient(args);
+            return client.run(args); //This is broken!! DELETE IT
         } catch (IOException e) {
             e.printStackTrace();
         }

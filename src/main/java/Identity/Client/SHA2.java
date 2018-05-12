@@ -81,7 +81,7 @@ public class SHA2
         try {
             tryMD5(args[0]);
             trySHA(args[0]);
-        } catch (java.security.NoSuchAlgorithmException e) {
+        } catch (NoSuchAlgorithmException e) {
             System.err.println(e);
         }
     }

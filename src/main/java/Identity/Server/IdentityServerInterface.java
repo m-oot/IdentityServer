@@ -1,6 +1,7 @@
 package Identity.Server;
 
-import Identity.Client.SHA2;
+//import Identity.Client.SHA2;
+//import com.sun.org.apache.regexp.internal.RE;
 
 import java.rmi.Remote;
 import java.rmi.RemoteException;
@@ -24,7 +25,7 @@ public interface IdentityServerInterface extends Remote {
      * @return
      * @throws RemoteException
      */
-    User create(String loginName, String realName, String password) throws RemoteException;
+    User create(String loginName, String realName, String password) throws RemoteException, PartitionedException;
 
     /**
      * --lookup <loginname>
@@ -56,7 +57,7 @@ public interface IdentityServerInterface extends Remote {
      * @return
      * @throws RemoteException
      */
-    int modify(String oldLoginName, String newLoginName, String password) throws RemoteException;
+    int modify(String oldLoginName, String newLoginName, String password) throws RemoteException, PartitionedException;
 
     /**
      *--delete <loginname> [--password <password>]
@@ -66,7 +67,7 @@ public interface IdentityServerInterface extends Remote {
      * @return
      * @throws RemoteException
      */
-    int delete(String userToDelete, String password) throws RemoteException;
+    int delete(String userToDelete, String password) throws RemoteException, PartitionedException;
 
     /**
      * --get users|uuids|all
@@ -78,4 +79,17 @@ public interface IdentityServerInterface extends Remote {
      * @throws RemoteException
      */
      List<String> get(String option) throws RemoteException;
+
+    /**
+     * This method returns the coordinators connection info (ipaddress, port). It can be used
+     * if a client wants to talk directly to the coordinator to limit communication delay.
+     *
+     * @return ServerInfo object containing coordinator connection info
+     * @throws RemoteException
+     */
+     ServerInfo getCoordinatorInfo() throws RemoteException;
+
+     void announceNewServer(ServerInfo server) throws RemoteException;
+
+     void kill() throws RemoteException ;
 }

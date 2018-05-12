@@ -15,8 +15,8 @@ public class UserGenerator {
 
     public static void Initialize() {
         takenNames = new Hashtable<>();
-        File nounFile = new File("nouns.txt");
-        File adjetivesFile = new File("adjectives.txt");
+        File nounFile = new File("GeneratorWords/nouns.txt");
+        File adjetivesFile = new File("GeneratorWords/adjectives.txt");
         nouns = new ArrayList<String>();
         adjectives = new ArrayList<String>();
         try {

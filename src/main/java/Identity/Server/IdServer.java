@@ -9,55 +9,133 @@ import org.kohsuke.args4j.Option;
 
 import javax.rmi.ssl.SslRMIClientSocketFactory;
 import javax.rmi.ssl.SslRMIServerSocketFactory;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.OutputStreamWriter;
 import java.lang.Thread;
+import java.lang.reflect.Array;
+import java.net.*;
+import java.rmi.NotBoundException;
+import java.rmi.Remote;
 import java.rmi.RemoteException;
-import java.rmi.server.RMIClientSocketFactory;
-import java.rmi.server.RMIServerSocketFactory;
-import java.rmi.server.ServerNotActiveException;
-import java.rmi.server.UnicastRemoteObject;
+import java.rmi.server.*;
 import java.rmi.registry.*;
 import java.text.SimpleDateFormat;
-import java.util.ArrayList;
-import java.util.Date;
-import java.util.List;
-import java.util.UUID;
+import java.util.*;
 
 import static Identity.Client.SHA2.trySHA;
+import static Identity.Server.CommitState.State.*;
 import static java.rmi.server.RemoteServer.getClientHost;
 import static org.kohsuke.args4j.ExampleMode.ALL;
+import static Identity.Server.Action.Type.*;
 
 /**
  * Identity Server used to service Identity Clients
  * @author Mayson Green
  * @author Alex Mussell
  */
-public class IdServer implements IdentityServerInterface
+public class IdServer implements IdentityServerClusterInterface
 {
+    /**
+     * Args4j arguments
+     */
+    @Option(name="--numport",usage="--numport <port number>")
+    private int registryPort = 5156;
+    @Option(name="--verbose",usage="--verbose")
+    private boolean verbose;
+    @Option(name="--killdelay",usage="--killdelay")
+    private int killServerDelay = 0;
+    @Option(name="--dbfile",usage="--dbfile")
+    private String dbFileName = null;
+    @Option(name="--dbsh",usage="--dbsh")
+    private String debugServerHost = null;
+    @Option(name="--dbsp",usage="--dbsp")
+    private int debugServerPort = -1;
 
-    private DatabaseManager dm = new DatabaseManager("jdbc:sqlite:identity.db");
+    @Argument     // receives other command line parameters than options
+    private List<String> arguments = new ArrayList<String>();
+
+    private int serverId;
+    private CommitState currentCommitState = new CommitState();
+    private List<ServerInfo> liveServerInfo;
+    private List<Action> actionHistory;
+    private int lStamp; //current lamport timestamp
+    private int lastSynchronization = -1;
+    private ServerInfo coordinator;
+    private ServerInfo myInfo;
+    private boolean amCoordinator; //Set true if this server is the coordinator, otherwise false
+    private int nextID = 1;
+    private String databaseUrl;
+    private DatabaseManager dm;
+    private Logger log;
+    private String verboseChannel = "verbose";
+    private String eventChannel = "event";
+
+    private static String databaseUrlPrefix = "jdbc:sqlite:";
+    private static int syncDelay = 1000;
+    private static int heartBeatDelay = 2000;
+    private Action actionForCommit;
+
+    /**
+     * Starts the server
+     * ==============================================================
+     * ==============================================================
+     */
+    public static void main(String[] args) throws IOException {
+        //Setting SSL properties
+        System.setProperty("javax.net.ssl.keyStore", "Security/Server_Keystore");
+        System.setProperty("javax.net.ssl.keyStorePassword", "test123");
+        System.setProperty("javax.net.ssl.trustStore", "Security/Client_Truststore");
+        System.setProperty("java.security.policy", "Security/mysecurity.policy");
+        try {
+            IdServer server = new IdServer(args);
+        } catch (Exception e) {
+            e.printStackTrace();
+            System.out.println("Exception occurred: " + e);
+        }
+    }
+
 
     /**
      * Default constructor
      */
-    public IdServer() {
+    public IdServer(String[] args) {
+        run(args); //Parses command line arguments
+        Random rand = new Random();
+        //Setting up DataBase
+        if(dbFileName == null) {
+            databaseUrl = databaseUrlPrefix + "identity-" + this.registryPort + ".db";
+        } else {
+            databaseUrl = databaseUrlPrefix + dbFileName;
+        }
+        dm = new DatabaseManager(databaseUrl);
+        if(dbFileName == null) dm.setUp();
+        log = new Logger();
+        liveServerInfo = Collections.synchronizedList(new ArrayList<>());
+        actionHistory = Collections.synchronizedList(new ArrayList<>());
+        lastSynchronization = dm.getLogicalStamp();
+        lStamp = lastSynchronization;
+        serverId = dm.getServerID();
+        System.out.println(dm.getCommitState());
+        currentCommitState.setCurrentState(dm.getCommitState());
+        log.log(verboseChannel, "Current commit state: " + currentCommitState.getCurrentState());
         Runtime.getRuntime().addShutdownHook(new ShutdownHook());   //Shuts down server properly
+
+        log.addChannel(verboseChannel,null);
+        log.addChannel(eventChannel,System.out);
+        if(debugServerHost != null && debugServerPort != -1) log.addServerChannel(verboseChannel,debugServerHost,debugServerPort);
+        log.setPrefix(verboseChannel,this.registryPort + ":");
+        if(verbose) {
+            log.addStream(verboseChannel,System.out);
+            log.log(verboseChannel,"Verbose set");
+        }
+        if(killServerDelay > 0) {
+            log.log(eventChannel,"Killing server in " + killServerDelay + " milliseconds");
+            this.kill(killServerDelay);
+        }
+        getKnownServers();
     }
-
-    /**
-     * ==================================================
-     * Arguments
-     * ==================================================
-     */
-    @Option(name="--numport",usage="--numport <port number>")
-    public int registryPort = 5156;
-
-    @Option(name="--verbose",usage="--verbose")
-    private boolean verbose;
-
-    // receives other command line parameters than options
-    @Argument
-    private List<String> arguments = new ArrayList<String>();
 
     /**
      * ===================================================
@@ -68,13 +146,8 @@ public class IdServer implements IdentityServerInterface
         CmdLineParser parser = new CmdLineParser(this);
 
         try {
-            // parse the arguments.
             parser.parseArgument(args);
-
         } catch( CmdLineException e ) {
-            // if there's a problem in the command line,
-            // you'll get this exception. this will report
-            // an error message.
             System.err.println(e.getMessage());
             System.err.println("java IdServer [--numport <port#>] [--verbose] <query>");
             // print the list of available options
@@ -82,17 +155,33 @@ public class IdServer implements IdentityServerInterface
             System.err.println();
 
             // print option sample. This is useful some time
-            System.err.println("   Example: java IdServer"+parser.printExample(ALL));
+            System.exit(1);
         }
+    }
 
-        if(verbose) {
-            System.out.println("Verbose set");
-            System.out.println("Trying to run server on port " + registryPort);
-
+    private void kill(long delayMilliseconds) {
+        class KillTask extends TimerTask {
+            public void run() {
+                System.exit(1);
+            }
         }
+        Timer timer = new Timer();
+        timer.schedule(new KillTask(),delayMilliseconds);
+    }
 
-        bind();
-
+    /**
+     * Finds the most recently updated user in a list
+     * @param users
+     * @return
+     */
+    private User findMostRecentlyUpdatedUser(List<User> users) {
+        User mostRecentlyUpdatedUser = users.get(0);
+        for(User u : users) {
+            if(u.getLstamp() > mostRecentlyUpdatedUser.getLstamp()) {
+                mostRecentlyUpdatedUser = u;
+            }
+        }
+        return mostRecentlyUpdatedUser;
     }
 
     /**
@@ -100,52 +189,98 @@ public class IdServer implements IdentityServerInterface
      * RMI methods
      * =======================================
      */
+    @Override
+    public void kill() throws RemoteException {
+        log.log(verboseChannel,"Killed by client");
+        System.exit(0);
+    }
 
     @Override
-    public User create(String loginName, String realName, String password) throws RemoteException {
-        if (verbose) System.out.println(getTimeStamp() + "attempting to create new user: " + loginName);
+    public synchronized User create(String loginName, String realName, String password) throws RemoteException, PartitionedException {
+        log.log(verboseChannel,getTimeStamp() + "attempting to create new user: " + loginName);
+        if(!amCoordinator) {
+            log.log(verboseChannel,"Forwarding request to coordinator");
+            return coordinator.getRemObj().create(loginName,realName,password);
+        }
+        if(currentCommitState.getCurrentState() == READY) throw new PartitionedException("The network is partitioned");
         String passwordHash = null;
-        if(password != null){passwordHash = trySHA(password);} //Hash it twice, cause our database could be compromised.
+        if(password != null){passwordHash = trySHA(password);} //Hash it twice, because our database could be compromised.
         String ip = "Could not be determined";
         try {
             ip = getClientHost();
         } catch (ServerNotActiveException e) {
             e.printStackTrace();
         }
+        int lTimeStamp = nextLamportTime();
         User user = new User(UUID.randomUUID().toString(),loginName,realName,passwordHash,ip);
+        user.setLstamp(lTimeStamp);
+        Action action = new Action(lTimeStamp, CREATE,user);
+
+        if(startTwoPhaseCommitPhaseOne(action) == -1){
+            throw new PartitionedException("The system is partitioned. Unable to complete this request.");
+        } //Unable to commit action
         User retUser = (dm.createUser(user) == 1) ? user : null;
+        actionHistory.add(action);
+        twoPhaseCommitPhaseTwo(action);
         return retUser;
     }
 
     @Override
     public User lookup(String loginName) throws RemoteException {
-        if (verbose) System.out.println(getTimeStamp() + " Looking up " + loginName);
+        log.log(verboseChannel,getTimeStamp() + " Looking up " + loginName);
         User user = dm.getUserByName(loginName);
         if(user == null){
-            if (verbose) System.out.println("User not found");
+            log.log(verboseChannel, "User not found");
         }
         return user;
     }
 
     @Override
     public User reverseLookup(String uuid) throws RemoteException {
-        if (verbose) System.out.println(getTimeStamp() +  " Looking up " + uuid);
+        log.log(verboseChannel,getTimeStamp() +  " Looking up " + uuid);
         User user = dm.getUserByUUID(uuid);
         return user;
     }
 
     @Override
-    public int modify(String oldLoginName, String newLoginName, String password) throws RemoteException {
-        if (verbose) System.out.println(getTimeStamp() + " Modifying " + oldLoginName + " to " + newLoginName);
+    public synchronized int modify(String oldLoginName, String newLoginName, String password) throws RemoteException, PartitionedException {
+        log.log(verboseChannel,getTimeStamp() + " Modifying " + oldLoginName + " to " + newLoginName);
+        if(!amCoordinator) {
+            log.log(verboseChannel,"Forwarding request to coordinator");
+            return coordinator.getRemObj().modify(oldLoginName,newLoginName,password);
+        }
         String psswd = (password == null) ? null : trySHA(password);
-        return dm.changeUserName(oldLoginName,newLoginName,psswd);
+        int lTimeStamp = nextLamportTime();
+        User user = new User(null,oldLoginName,null,psswd,null);
+        user.setLstamp(lTimeStamp);
+        Action action = new Action(lTimeStamp,UPDATE,user,newLoginName);
+        if(startTwoPhaseCommitPhaseOne(action) == -1){
+            throw new PartitionedException("The system is partitioned. Unable to complete this request.");
+        } //Unable to commit action
+        int successCode = dm.changeUserName(oldLoginName,newLoginName,psswd,lTimeStamp);
+        actionHistory.add(action);
+        twoPhaseCommitPhaseTwo(action);
+        return successCode;
     }
 
     @Override
-    public int delete(String loginName, String password) throws RemoteException {
-        if (verbose) System.out.println(getTimeStamp() + " Deleting " + loginName);
+    public synchronized int delete(String loginName, String password) throws RemoteException, PartitionedException {
+        log.log(verboseChannel,getTimeStamp() + " Deleting " + loginName);
+        if(!amCoordinator) {
+            log.log(verboseChannel,"Forwarding request to coordinator");
+            return coordinator.getRemObj().delete(loginName,password);
+        }
+        int lTimeStamp = nextLamportTime();
         String passwordHash = (password == null) ? null : trySHA(password);
-        return dm.deleteUser(loginName,passwordHash);
+        User user = new User(null,loginName,null,passwordHash,null);
+        Action action = new Action(lTimeStamp,DELETE,user);
+        if(startTwoPhaseCommitPhaseOne(action) == -1){
+            throw new PartitionedException("The system is partitioned. Unable to complete this request.");
+        } //Unable to commit action
+        int successCode = dm.deleteUser(loginName,passwordHash,lTimeStamp);
+        actionHistory.add(action);
+        twoPhaseCommitPhaseTwo(action);
+        return successCode;
     }
 
     @Override
@@ -174,12 +309,517 @@ public class IdServer implements IdentityServerInterface
         for(String s : strings) {
             System.out.println(s);
         }
+        User user = findMostRecentlyUpdatedUser(users);
         return strings;
     }
 
-    //Gets a time stamp with the current time
+    @Override
+    public ServerInfo getCoordinatorInfo() throws RemoteException {
+        return coordinator;
+    }
+
+    /**
+     * Returns the current time in a printable format
+     * @return
+     */
     private String getTimeStamp(){
         return "[" + new SimpleDateFormat("MM/dd: HH.mm.ss").format(new Date()) + "] ";
+    }
+
+    /**
+     * Used to create thread safe access to lstamp
+     * @return
+     */
+    private synchronized int nextLamportTime() {
+        lStamp++;
+        return lStamp;
+    }
+
+    /**
+     * updates the lamport time stamp
+     */
+    private synchronized int setLamportTime(int lStamp){
+        return this.lStamp = lStamp;
+    }
+
+    /**
+     *====================================================================
+     * Election RMI calls
+     * ===================================================================
+     */
+    @Override
+    public int startElection() throws RemoteException {
+        class Election implements Runnable {
+            @Override
+            public void run() {
+                runElection();
+            }
+        }
+        new Thread(new Election()).start();
+        return 1;
+    }
+
+    /**
+     * Uses the bully algorithm to run an election. Instead of making the server with the highest id
+     * the coordinator, it makes the server with the lowest id the coordinator
+     * @return
+     */
+    public synchronized boolean runElection() {
+        boolean amCoordinator = true; //Set true if this server is the coordinator
+        for(ServerInfo server : new ArrayList<>(liveServerInfo)) { //Iterating over a copy of the list so that we can iterate and modify the old list at the same time
+            try {
+                if(server.getServerId() < this.serverId) {
+                    log.log(verboseChannel,"ELECTION: Checking with: " + server);
+                    server.getRemObj().startElection(); //Start elections on all servers with a lower id
+                    amCoordinator = false; // We were able to connect to a superior server, so we must not be the coordinator
+                }
+            } catch (RemoteException e) {
+                log.log(verboseChannel,"ELECTION: Could not connect with: " + server);
+            }
+        }
+        this.amCoordinator = amCoordinator;
+        if(this.amCoordinator) {
+            log.log(verboseChannel,"I won the election!");
+            coordinator = myInfo;
+            for(ServerInfo server : liveServerInfo) {
+                try {
+                    server.getRemObj().announceVictory(this.serverId);
+                } catch (RemoteException e) {
+                }
+            }
+            //Make sure our data base is up to date
+            for (ServerInfo server : liveServerInfo){
+                try {
+                    int currentServersLastSyncTime = server.getRemObj().getLastSynchronizedTime();
+                    if (currentServersLastSyncTime > lastSynchronization){
+                        synchronizeActions(server.getRemObj().getActions(lastSynchronization));
+                    }
+                } catch (RemoteException e) {
+                }
+            }
+        }
+        return amCoordinator;
+    }
+
+    @Override
+    public void announceVictory(int serverId) throws RemoteException {
+        log.log(verboseChannel,"ELECTION received election victory announcement for server: " + serverId);
+        for(ServerInfo server : liveServerInfo) { //Loop through all current live servers to find coordinator remObj
+            if(server.getServerId() == serverId) {
+                coordinator = server;
+                break;
+            }
+        }
+        startHeartBeat();
+    }
+
+    @Override
+    public boolean checkIfAlive() throws RemoteException {
+        return true;
+    }
+
+    @Override
+    public ArrayList<ServerInfo> getLiveServers() throws RemoteException {
+        ArrayList<ServerInfo> liveServerInfoCopy = new ArrayList<>(liveServerInfo);
+        liveServerInfoCopy.add(myInfo);
+        return liveServerInfoCopy;
+    }
+
+    @Override
+    public int joinCluster(ServerInfo server, int serverId) throws RemoteException, NotCoordinatorException {
+        if(!amCoordinator) throw new NotCoordinatorException("You must connect to the coordinator to get an ID");
+        if(serverId == -1) {
+            server.setServerId(nextID);
+        } else {
+            server.setServerId(serverId);
+        }
+        if(liveServerInfo.contains(server)){ //Keeping live server list current
+            liveServerInfo.remove(server);
+            System.out.println("Removed " + server.toString() + " from live servers");
+        }
+        try {
+            server.setRemObj(getRemoteObject(server)); //Connect to new server and store its remote object reference
+            for(ServerInfo liveServer : liveServerInfo) {
+                try {
+                    liveServer.getRemObj().announceNewServer(server); //Tell all live servers about the new server
+                } catch (Exception e) {
+                }
+            }
+            liveServerInfo.add(server);
+        } catch (NotBoundException e) {
+            return -1;
+        }
+        return serverId == -1 ? nextID++ : serverId;
+    }
+
+    @Override
+    public int synchronizeActions(List<Action> actionHistory) throws RemoteException {
+        if (actionHistory.isEmpty()) return 0;
+        for(int i = 0; i < actionHistory.size(); i++) {
+            if(actionHistory.get(i).getStamp() > lastSynchronization) actionHistory.get(i).execute(dm);
+        }
+        lastSynchronization = actionHistory.get(actionHistory.size() - 1).getStamp();
+        return 0;
+    }
+
+    @Override
+    public ArrayList<Action> getActions(int lastSyncTime) throws RemoteException {
+        int lastSyncIndex = -1;
+        for(Action action : actionHistory){
+            if(action.getStamp() == lastSyncTime){
+                lastSyncIndex = actionHistory.indexOf(action);
+            }
+        }
+        if(lastSyncIndex == -1){
+            throw new RemoteException();
+        }
+        int lastIndex = actionHistory.size() - 1;
+        return new ArrayList<Action>(actionHistory.subList(lastSyncIndex, lastIndex));
+    }
+
+    @Override
+    public int getLastSynchronizedTime() throws RemoteException {
+        return lastSynchronization;
+    }
+
+    /**
+     *================================================================================
+     * Two Phase Commit methods
+     * ===============================================================================
+     */
+
+    @Override
+    public CommitState.State getCommitState() throws RemoteException {
+        return currentCommitState.getCurrentState();
+    }
+
+    @Override
+    public int voteRequest(Action actionForCommit) throws RemoteException {
+        if(amCoordinator){
+            System.out.println("Non coordinator called vote request on the coordinator.");
+            runElection();
+        }
+        log.log(verboseChannel, "Vote request received for action: " + actionForCommit.getStamp());
+
+        this.actionForCommit = actionForCommit;
+        currentCommitState.setCurrentState(READY);
+        dm.setCommitState(CommitState.stateToInt(READY));
+        abortIfNoResponse(actionForCommit.getStamp());
+        return currentCommitState.getCurrentState() == READY ? 1 : -1;
+    }
+
+    @Override
+    public int abort() throws RemoteException {
+        log.log(verboseChannel, "Abort message recieved");
+        currentCommitState.setCurrentState(ABORT);
+        dm.setCommitState(CommitState.stateToInt(ABORT));
+        actionForCommit = null;
+        return 1;
+    }
+
+    @Override
+    public void commit() throws RemoteException {
+        log.log(verboseChannel, "Commiting action: " + actionForCommit.getStamp());
+        actionHistory.add(actionForCommit);
+        actionForCommit.execute(dm);
+        lStamp = actionForCommit.getStamp();
+        lastSynchronization = lStamp;
+        actionForCommit = null;
+        currentCommitState.setCurrentState(COMMIT);
+        dm.setCommitState(CommitState.stateToInt(COMMIT));
+    }
+
+    private int startTwoPhaseCommitPhaseOne(Action currentActionRequest){
+        currentCommitState.setCurrentState(INIT);
+        dm.setCommitState(CommitState.stateToInt(INIT));
+        try {
+            log.log(verboseChannel, "Two Phase Commit initiated for action: " + currentActionRequest.getStamp());
+            //Setting all servers to READY
+            for(ServerInfo server : liveServerInfo){
+                if(server.getRemObj().voteRequest(currentActionRequest) == -1){
+                    log.log(verboseChannel, "Bad state received from " + server.toString());
+                    currentCommitState.setCurrentState(ABORT);
+                    dm.setCommitState(CommitState.stateToInt(ABORT));
+                    for (ServerInfo s: liveServerInfo) {
+                        try {
+                            s.getRemObj().abort();
+                        } catch (RemoteException e1) {
+                            log.log(verboseChannel, "Problem sending abort message.");
+                        }
+                        return -1; //Abort message sent
+                    }
+                }
+            }
+        } catch (RemoteException e) {
+            log.log(verboseChannel, "Not everyone is ready. Aborting vote request.");
+            currentCommitState.setCurrentState(ABORT);
+            dm.setCommitState(CommitState.stateToInt(ABORT));
+            for (ServerInfo server : liveServerInfo){
+                System.out.println(server.toString());
+            }
+            for (ServerInfo server: liveServerInfo) {
+                try {
+                    server.getRemObj().abort();
+                } catch (RemoteException e1) {
+                    log.log(verboseChannel, "Problem sending abort message.");
+                }
+                return -1; //Abort message sent
+            }
+        }
+
+        currentCommitState.setCurrentState(COMMIT);
+        dm.setCommitState(CommitState.stateToInt(COMMIT));
+        return 1;
+    }
+
+    private void twoPhaseCommitPhaseTwo(Action currentActionRequest) {
+        //Sending commit to all servers
+        log.log(verboseChannel, "Commiting action: " + currentActionRequest.getStamp());
+        try {
+            for (ServerInfo server : liveServerInfo){
+                log.log(verboseChannel, "Sending commit for action: " + currentActionRequest.getStamp());
+                server.getRemObj().commit();
+            }
+        } catch (RemoteException e) {
+            log.log(verboseChannel, "Problem with commiting action to backup servers. Aborting.");
+        }
+        lStamp = currentActionRequest.getStamp();
+        log.log(verboseChannel, "Commit made for action: " + currentActionRequest.getStamp());
+    }
+
+    /**
+     * A thread to run and make a decision if no commit message is received from the coordinator
+     * after receiving a vote request
+     * @param actionlStamp - The logical time stamp of the request
+     */
+    private void abortIfNoResponse(int actionlStamp) {
+        Timer timer = new Timer();
+        class CommitListener extends TimerTask {
+
+            @Override
+            public void run() {
+                    while(currentCommitState.getCurrentState() == READY){
+                        log.log(verboseChannel, "No commit message recieved for action: " + actionlStamp);
+                        log.log(verboseChannel, "Asking other servers for state information.");
+
+                        for(int i = 0; i < liveServerInfo.size(); i++) {
+                            ServerInfo server = liveServerInfo.get(i);
+                            try{
+                                CommitState.State serverState = server.getRemObj().getCommitState();
+                                System.out.println(serverState);
+                                if(serverState == CommitState.State.COMMIT){
+                                    log.log(verboseChannel, "Found another server in the commit state for action: " + actionlStamp);
+                                    log.log(verboseChannel, "Executing action: " + actionlStamp);
+                                    currentCommitState.setCurrentState(INIT);
+                                    dm.setCommitState(CommitState.stateToInt(INIT));
+                                    actionHistory.add(actionForCommit);
+                                    actionForCommit.execute(dm);
+                                    setLamportTime(actionlStamp);
+                                    return;
+                                } else if(serverState == CommitState.State.ABORT | serverState == INIT){
+                                    log.log(verboseChannel, "Found server in bad state for action: " + actionlStamp);
+                                    log.log(verboseChannel, "Aborting action: " + actionlStamp);
+                                    currentCommitState.setCurrentState(ABORT);
+                                    dm.setCommitState(CommitState.stateToInt(ABORT));
+                                    return;
+                                }
+                            } catch (RemoteException e) {
+                            }
+                        }
+                    }
+            }
+        }
+        CommitListener cl = new CommitListener();
+        timer.schedule(cl, 5000); //Schedules timer.run() after a scheduled amount of time
+    }
+
+    /**
+     *==============================================================================================
+     * Server set up methods
+     * =============================================================================================
+     */
+
+    private void startHeartBeat() {
+        Timer timer = new Timer();
+        class HeartBeat extends TimerTask {
+
+            @Override
+            public void run() {
+                try {
+                    coordinator.getRemObj().checkIfAlive();
+                } catch (RemoteException e) {
+                    try {
+                        timer.cancel(); //Stop the heart beat checks while we run the election
+                        startElection();
+                        log.log(verboseChannel, "Election started.");
+                    } catch (RemoteException e1) {
+                    }
+                }
+            }
+        }
+        HeartBeat hb = new HeartBeat();
+        timer.scheduleAtFixedRate(hb, 0, heartBeatDelay); //Schedules timer.run() to execute periodically
+    }
+
+    @Override
+    public void announceNewServer(ServerInfo server) throws RemoteException {
+        try {
+            log.log(verboseChannel,"NEW SERVER: trying to connect with " + server);
+            server.setRemObj(getRemoteObject(server));
+            if(liveServerInfo.contains(server)) liveServerInfo.remove(server); //Removing old remote object
+            liveServerInfo.add(server);
+        } catch (NotBoundException e) {
+            log.log(verboseChannel,"Could not connect to new server: " + server.toString());
+        }
+    }
+
+    /**
+     * Gets a remote object from a server
+     * @param server The server info where the remote object will be
+     * @return
+     * @throws RemoteException
+     * @throws NotBoundException
+     */
+    private IdentityServerClusterInterface getRemoteObject(ServerInfo server) throws RemoteException, NotBoundException {
+        log.log(verboseChannel, "Trying to connect with " + server.toString());
+        Registry registry = LocateRegistry.getRegistry(server.getHostIpAddress(), server.getRegistryPort());
+        IdentityServerClusterInterface remObj = (IdentityServerClusterInterface)registry.lookup("IdServer");
+        server.setRemObj(remObj);
+        return  remObj;
+    }
+
+    /**
+     * Sets rmi socket timeout
+     * @param timeoutMilliseconds
+     */
+    private void setRmiTimeout(int timeoutMilliseconds) {
+        try {
+            RMISocketFactory.setSocketFactory(new RMISocketFactory()
+            {
+                public Socket createSocket(String host, int port ) throws IOException {
+                    Socket socket = new Socket();
+                    socket.setSoTimeout(timeoutMilliseconds);
+                    socket.setSoLinger( false, 0 );
+                    socket.connect( new InetSocketAddress( host, port ), timeoutMilliseconds );
+                    return socket;
+                }
+                public ServerSocket createServerSocket(int port ) throws IOException {
+                    return new ServerSocket( port );
+                }
+            } );
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void setMyInfo(){
+        //Setting Server info
+        String myIpaddress = "";
+        try {
+            myIpaddress = InetAddress.getLocalHost().getHostAddress(); //If an exception is thrown here, our systems not going to work, we could fix it, but we haven't
+        } catch (UnknownHostException e) {
+            e.printStackTrace();
+        }
+        myInfo = new ServerInfo(myIpaddress,registryPort);
+    }
+
+    private ServerInfo findCoordinator() throws RemoteException {
+        //Getting list of servers from file
+        ServerAddressParser fileParser = new ServerAddressParser("KnownServers.txt");
+        liveServerInfo = fileParser.getServerInfo();
+        liveServerInfo.remove(myInfo);
+        //Looping through known servers trying to make a connection
+        IdentityServerClusterInterface remObj = null;
+        boolean connected = false;
+        for(ServerInfo server : liveServerInfo){
+            try {
+                remObj = getRemoteObject(server);
+                connected = true;
+                break;
+            } catch (NotBoundException e) {
+            } catch (RemoteException e) {
+            }
+        }
+        if(!connected) return null;
+        return remObj.getCoordinatorInfo();
+    }
+
+    /**
+     * Gets the remote object
+     */
+    public void getKnownServers(){
+
+        setRmiTimeout(1000);
+
+        setMyInfo();
+
+        try{
+            if ((coordinator = findCoordinator()) == null && serverId == -1) { //You are the coordinator
+                bind();
+                //You are the only known server
+                dm.setServerID(1);
+                serverId = 1;
+                myInfo.setServerId(serverId);
+                amCoordinator = true;
+                coordinator = myInfo;
+                log.log(verboseChannel,"No live servers found. My server info: " + myInfo);
+                nextID++;
+            } else if (serverId == -1){ //You have never joined and need to connect to the coordinator
+                coordinator.setRemObj(getRemoteObject(coordinator));
+                liveServerInfo = coordinator.getRemObj().getLiveServers();
+
+                if(liveServerInfo.contains(myInfo)){ liveServerInfo.remove(myInfo);}
+
+                //Getting all remote objects from live servers
+                log.log(verboseChannel,"Connecting to all live servers");
+                for (ServerInfo server : liveServerInfo) {
+                    try {
+                        server.setRemObj(getRemoteObject(server));
+                    } catch (RemoteException | NotBoundException e) {
+                        log.log(verboseChannel, "Could not connect with " + server.getHostIpAddress());
+                    }
+                }
+
+                bind();
+                serverId = coordinator.getRemObj().joinCluster(myInfo,serverId);
+                dm.setServerID(serverId);
+                myInfo.setServerId(serverId);
+                log.log(verboseChannel,"My server info " + myInfo);
+                startHeartBeat();
+            } else{ //You have lost connection/died and need to reconnect
+                log.log(verboseChannel, "Rejoining cluster");
+                bind();
+                if(coordinator == null){
+                    coordinator = myInfo;
+                    amCoordinator = true;
+                } else{
+                    coordinator.setRemObj(getRemoteObject(coordinator));
+                    liveServerInfo = coordinator.getRemObj().getLiveServers();
+                    liveServerInfo.remove(myInfo);
+                    serverId = coordinator.getRemObj().joinCluster(myInfo,serverId);
+
+                    startHeartBeat();
+
+                    //Making sure remote objects are valid
+                    for(ServerInfo server : liveServerInfo){
+                        server.setRemObj(getRemoteObject(server));
+                    }
+
+                    //Make sure we are up to date on actions
+                    ArrayList<Action> neededActions = coordinator.getRemObj().getActions(lStamp);
+                    for (Action action : neededActions){
+                        action.execute(dm);
+                        lStamp = action.getStamp();
+                    }
+                }
+            }
+        }catch (NotCoordinatorException e) {
+            System.err.println("I tried to connect to coordinator, but it wasn't the coordinator...");
+            e.printStackTrace();
+            System.exit(0);
+        } catch (RemoteException e) {
+        } catch (NotBoundException e) {
+        }
     }
 
     /**
@@ -187,6 +827,7 @@ public class IdServer implements IdentityServerInterface
      */
     public void bind() {
         try {
+            log.log(verboseChannel,"Trying to bind server on port " + registryPort);
             RMIClientSocketFactory csf = new SslRMIClientSocketFactory();
             RMIServerSocketFactory ssf = new SslRMIServerSocketFactory();
             IdentityServerInterface server = (IdentityServerInterface) UnicastRemoteObject.exportObject(this, 0, csf,
@@ -195,7 +836,7 @@ public class IdServer implements IdentityServerInterface
             Registry registry = LocateRegistry.createRegistry(registryPort);
 
             registry.rebind("IdServer", server);
-            if (verbose){ System.out.println("IdServer bound on port " + registry);}
+            log.log(verboseChannel,"IdServer bound on port " + registry);
         } catch (Exception e) {
             e.printStackTrace();
             System.out.println("Exception occurred: " + e);
@@ -211,6 +852,7 @@ public class IdServer implements IdentityServerInterface
     private class ShutdownHook extends Thread{
         public ShutdownHook(){};
         public void run() {
+            log.log(verboseChannel,"Server is shutting down");
             shutDownGracefully("Server is shutting down");
         }
     }
@@ -223,25 +865,5 @@ public class IdServer implements IdentityServerInterface
         dm.updateDatabase();
     }
 
-
-    /**
-     * Starts the server
-     * ==============================================================
-     * ==============================================================
-     */
-    public static void main(String[] args) throws IOException {
-        System.setProperty("javax.net.ssl.keyStore", "../Server_Keystore");
-        // Warning: change to match your password! Also the password should be
-        // stored encrypted in a file outside the program.
-        System.setProperty("javax.net.ssl.keyStorePassword", "test123");
-        System.setProperty("java.security.policy", "mysecurity.policy");
-        try {
-            IdServer server = new IdServer();
-            server.run(args); //Parses arguments
-        } catch (Throwable th) {
-            th.printStackTrace();
-            System.out.println("Exception occurred: " + th);
-        }
-    }
 }
 
