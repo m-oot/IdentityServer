@@ -2,8 +2,10 @@
 
 ## Overview:
  This project contains an identity server and client. The client can connect to the server and submit
- account requests. The set of commands that are supported can be seen below. 
-```
+ account requests. The set of commands that are supported can be seen below.
+
+ Client commands:
+ ```
  --create <loginname> [<real name>] [--password <password>]
  --lookup <loginname>
  --reverse-lookup <UUID>
@@ -11,34 +13,45 @@
  --delete <loginname> [--password <password>]
  --get users|uuids|all
 ```
+
+ Server options:
+ ```$xslt
+  --numport <port number>
+  --verbose
+  --dbfile <Database file location>
+```
 ## Manifest
 ```
     #Structure
     ├── .idea                 # intelliJ setup
     ├── src                   # Source files
     ├── target                # Generated output files
+    ├── adjectives.txt        # Adjectives used in the random name generator
+    ├── KnownServers.txt      # List of known servers that form the cluster
     ├── Makefile              # Makefile to compile program
+    ├── mysecurity.policy     # Java security settings
+    ├── nouns.txt             # Nouns used in the random name generator
     ├── pom.xml               # Maven pom.xml
     └── README.md             # This file
     #
     #Src files
     ├── ...
-    ├── src                   
-    │   ├── main 
+    ├── src
+    │   ├── main
     │   │    └── Java                   # All Java Source files
     │   │         └── Identity
     │   │               └── Client      #All Java Source files for IdClient
     │   │               └── Generator   #All Java Source files for Generating random users (Used in testing)
     │   │               └── Server      #All Java Source files for IdServer
     │   │               └── Database    #All Java Source files for the Database
-    │   └── test
+    │   └── test        └── DebugServer #All Java Source files for the DebugServer
     │        └── Java                   # All Test written in Java
     └── ...
     #
     #
     #target [this will only be visible if the project has been compiled]
      ├── ...
-     ├── target                   
+     ├── target
      │   ├── classes         # All generated .class files
      │   ├── generated-sources
      │   ├── generated-test-sources
@@ -50,38 +63,49 @@
      #Source file descriptions
      FILE                            TYPE                                Description
 
-     IdServer.java                   DRIVER (server)                     Manages messaging groups
+     IdServer.java                   DRIVER (server)                     Driver for server
      IdClient.java                   DRIVER (client)                     Driver for client
-     SHA2.java                       SOURCE                              Helps set up the GUI
-     TestUser.java                   SOURCE (testing)                    Server for clients to connect to
-     UserGenerator.java              SOURCE (testing)                    Object used for Client --> Server communication
-     Database.java                   SOURCE                              Client used for testing the server
-     DatabaseManager.java            SOURCE                              Represents a client
-     IdentityServerInterface.java    Interface
-     User.java                       Source
+     SHA2.java                       SOURCE                              Hashes Passwords
+     TestUser.java                   SOURCE (testing)                    User object for testing
+     UserGenerator.java              SOURCE (testing)                    Generates User Objects and command line args
+     Database.java                   SOURCE                              Manages sqlite database
+     DatabaseManager.java            SOURCE                              Manages in memory key value store and database
+     IdentityServerInterface.java    Interface                           Remote Object Interface for server
+     User.java                       Source                              Stores user info
+     DebugServer                     SOURCE (testing)                    Used for servers to log messages to a gui
+     DebugServerGUI                  SOURCE                              GUI for debug server with multiple text outputs
+     DebugServerInterface            SOURCE                              Remote object interface for debug server
+     Action                          SOURCE                              Object to store and execute database manager write function
+     CommitState                     SOURCE                              Object to store state of two phase commit
+     IdentityServerClusterInterface  SOURCE                              Remote object interface for server cluster nodes
+     Logger                          SOURCE                              Message logging
+     NotCoordinatorException         SOURCE                              Exception
+     PartitionException              SOURCE                              Exception thrown when cluster is partitioned
+     ServerAddressParser             SOURCE                              Parses a file for <host,port> list
+     ServerInfo                      SOURCE                              Stores info about a server
+
+
 ```
 ## Building the project
- This project uses Maven for compiling and running.
+This project uses Maven for compiling and running.
 
- To compile this project go to project root and run
-```
+ To compile this project go to project root ($GITROUTE/p2/) and run
+ ```
  make
 ```
  After the .java files have been compiled you can start the server by running (This will default to run on port 5156)
-```
+ ```
  make runserver
+ ```
+ To run the server in verbose mode and with more options run
+ ```
+ make ARGS="[args]" debug
 ```
- To run the server in verbose mode run
-```
- make debug
-```
- If you would like to specify a port rather than 5156 run the server with the following command
-```
- java -jar target/IdServer.jar --numport <numport>
-```
+ where [args] must be in the format [<portnum> [server options]]
+
  The client can be run using the following command from the project root directory
  (Defaults to localhost:5156 if no --server or --numport options are specified)
-```
+ ```
  java -jar target/IdClient.jar <args>
 ```
 
