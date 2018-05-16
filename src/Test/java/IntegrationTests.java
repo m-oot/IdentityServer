@@ -2,6 +2,7 @@ import Identity.Client.IdClient;
 import Identity.Generator.TestUser;
 import Identity.Generator.UserGenerator;
 import Identity.Database.Database;
+import Identity.Server.IdServer;
 import Identity.Server.User;
 import org.junit.Test;
 
@@ -141,10 +142,6 @@ public class IntegrationTests {
             int res = IdClient.test(userLookupArgs);
             assertEquals(1,res);
         }
-        Database db = new Database(dbURL);
-        db.deleteAllUsers();
-        db.close();
-
     }
 
 }

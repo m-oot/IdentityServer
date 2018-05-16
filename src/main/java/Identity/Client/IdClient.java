@@ -24,7 +24,7 @@ import java.util.concurrent.*;
 /**
  *A client that can execute RMI commands with the Identity Server
  *
- * java IdClient --server <serverhost> [--numport <port#>] <query>
+ * java IdClient [--server <serverhost>] [--numport <port#>] <query>
  *
  * @author Mayson Green
  * @author Alex Mussell
@@ -37,7 +37,6 @@ public class IdClient{
     private boolean testing;
     @Option(name="--server", aliases="-s", handler = StringArrayOptionHandler.class)
     private List<String> serverList = new ArrayList<String>();
-    //private String host = "localhost";
     @Option(name="--numport", aliases ="-n")
     private int registryPort = 5156;
     @Option(name="--password",aliases ="-p",usage="[--password <password>]")
@@ -58,22 +57,21 @@ public class IdClient{
     private String debugServerHost = null;
     @Option(name="--dbsp",usage="--dbsp")
     private int debugServerPort = -1;
-    @Option(name="--kill",usage="--kill")
-    private boolean kill;
     @Argument
     private List<String> arguments = new ArrayList<String>();    // receives other command line parameters than options
 
-    IdentityServerInterface remObj;
+    IdentityServerInterface remObj;    //A reference to the remote object on the IdServer
+
     Logger log;
     String debugServerChannel = "dbserverchannel";
 
-
     public static void main(String[] args) throws IOException{
         IdClient client = new IdClient(args);
+        client.connectToIdentityServer();
     }
 
     /**
-     * Default constructor
+     *IdClient constructor
      */
     public IdClient(String[] args) throws IOException {
         System.setProperty("javax.net.ssl.trustStore", "Security/Client_Truststore");
@@ -81,19 +79,17 @@ public class IdClient{
         log = new Logger();
         run(args);
         if(debugServerHost != null && debugServerPort != -1) log.addServerChannel(debugServerChannel,debugServerHost,debugServerPort);
-//        execute();
-        /* System.setSecurityManager(new RMISecurityManager()); */
     }
 
     /**
-     * Runs client
+     * Parses command line arguments and connects to an IdServer
      */
     public int run(String[] args) throws IOException {
         CmdLineParser parser = new CmdLineParser(this);
 
         try {
             parser.parseArgument(args);
-            if( arguments.isEmpty() && !kill) throw new CmdLineException(parser,"No argument is given");
+            if( arguments.isEmpty()) throw new CmdLineException(parser,"No argument is given");
         } catch( CmdLineException e ) {
             System.err.println(e.getMessage());
             System.err.println("java IdClient <serverhost> [--port <port#>] <query>");
@@ -106,31 +102,11 @@ public class IdClient{
 
             return -1;
         }
-
-        //Establish an RMI connection with an identity server
-        connectToIdentityServer();
-
         return 1;
-
     }
-
-    private int execute() throws IOException {
-        //Execute one of the commands
-        if(create) return create();
-        if(lookup) return lookup();
-        if(reverseLookup)  return reverseLookup();
-        if(modify) return modify();
-        if(delete) return delete();
-        if(get) return get();
-        if(kill) return kill();
-
-        return -1; //A command was not executed so return -1
-    }
-
-
 
     /**
-     * Gets the remote object
+     * Gets the remote object from the IdServer
      */
     public void connectToIdentityServer(){
         boolean connected = false;
@@ -149,7 +125,7 @@ public class IdClient{
                     }
                 };
                 Future<Object> future2 = executor2.submit(task2);
-                remObj = (IdentityServerInterface) future2.get(2, TimeUnit.SECONDS);
+                remObj = (IdentityServerInterface) future2.get(5, TimeUnit.SECONDS);
                 connected = true;
 
                 //Creating executor to execute request
@@ -160,9 +136,8 @@ public class IdClient{
                     }
                 };
                 Future<Object> future = executor.submit(task);
-                Object result = future.get(2, TimeUnit.SECONDS);
-                System.exit(1);
-                break;
+                Object result = future.get(5, TimeUnit.SECONDS);
+                System.exit(1); //The execution has not completed within the specified amount of time at this point
             }
             catch (InterruptedException e) {
             } catch (ExecutionException e) {
@@ -170,16 +145,31 @@ public class IdClient{
             }
         }
 
+        //Shuts the client down if no connection has been made
         System.out.println("Timeout error.");
         System.exit(0);
-        //Shuts the client down if no connection has been made
-        if(!connected) {
-            System.out.print("Unable to connect to any known server. Shutting down.");
-            System.exit(1);
-        }
-
     }
 
+    /**
+     * Executes the specified client action on the remote object
+     * @return
+     * @throws IOException
+     */
+    private int execute() throws IOException {
+        if(create) return create();
+        if(lookup) return lookup();
+        if(reverseLookup)  return reverseLookup();
+        if(modify) return modify();
+        if(delete) return delete();
+        if(get) return get();
+
+        return -1; //A command was not executed so return -1
+    }
+
+    /**
+     * Sets a timeout on RMI so we don't have to wait forever if there are no available servers
+     * @param timeoutMilliseconds
+     */
     private void setRmiTimeout(int timeoutMilliseconds) {
         try {
             RMISocketFactory.setSocketFactory(new RMISocketFactory()
@@ -199,6 +189,10 @@ public class IdClient{
         }
     }
 
+    /**
+     * Gets the known servers from the command line and KnownServers.txt
+     * @return - A list of the known servers
+     */
     public ArrayList<ServerInfo> getKnownServers() {
         ArrayList<ServerInfo> knownServers = new ArrayList<>();
         for(String server : serverList){
@@ -209,25 +203,19 @@ public class IdClient{
         return knownServers;
     }
 
+    /**
+     * Tries to get a Remote Object from a known server
+     * @param serviceName
+     * @param server
+     * @return
+     * @throws NotBoundException
+     * @throws RemoteException
+     */
     public Remote getRMIRemoteConnection(String serviceName, ServerInfo server) throws NotBoundException, RemoteException {
-        //log.logClient(debugServerChannel,"Trying to connect with " + server);
         Registry registry = LocateRegistry.getRegistry(server.getHostIpAddress(), server.getRegistryPort());
         Remote remObj = registry.lookup(serviceName);
-        //log.logClient(debugServerChannel,"connected with " + server.getHostIpAddress());
         return remObj;
     }
-
-    public int kill() {
-        try {
-            remObj.kill();
-            return 1;
-        } catch (RemoteException e) {
-            e.printStackTrace();
-        }
-        return -1;
-    }
-
-
 
     /**
      * Creates a new user

@@ -9,11 +9,11 @@ import java.util.*;
  * to a sql database. Makes use of lambda functions for dumping!
  */
 public class DatabaseManager {
-    private Hashtable<String,User> usersById;
-    private Hashtable<String,User> usersByName;
-    private Database db;
-    private List<Runnable> databaseChanges;
-    private Timer dumper;
+    private Hashtable<String,User> usersById;    //In memory database of users with user ID as key
+    private Hashtable<String,User> usersByName;  //In memory database of users with user name as key
+    private Database db;                         //Database on disk
+    private List<Runnable> databaseChanges;      //list of in memory changes that need to be dumped to disk
+    private Timer dumper;                        //A timer task that dumps databaseChanges to the disk periodically
 
     /**
      * Constructs a database manager. Initializes a sql database, reads in
@@ -27,6 +27,7 @@ public class DatabaseManager {
         databaseChanges = Collections.synchronizedList(new ArrayList<Runnable>());
         db = new Database(dbString);
 
+        //Putting any data stored in the database in memory
         ArrayList<User> users = db.getUsers();
         for(User u : users) {
             usersById.put(u.getUuid(),u);
@@ -37,6 +38,9 @@ public class DatabaseManager {
         dumper.scheduleAtFixedRate(new Dump(this),0,5000);
     }
 
+    /**
+     * Sets up the database (makes sure needed tables exist)
+     */
     public void setUp() {
         db.setUp();
     }
@@ -58,10 +62,19 @@ public class DatabaseManager {
         return db.getServerID();
     }
 
+    /**
+     * Gets the current commit state of the server
+     * @return
+     */
     public int getCommitState() {
         return db.getCommitState();
     }
 
+    /**
+     * Sets the commit state of the server
+     * @param state - The state to set the server
+     * @return
+     */
     public int setCommitState(int state) {
         return db.setCommitState(state);
     }

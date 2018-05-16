@@ -90,6 +90,4 @@ public interface IdentityServerInterface extends Remote {
      ServerInfo getCoordinatorInfo() throws RemoteException;
 
      void announceNewServer(ServerInfo server) throws RemoteException;
-
-     void kill() throws RemoteException ;
 }

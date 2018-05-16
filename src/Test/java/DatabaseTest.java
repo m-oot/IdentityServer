@@ -11,7 +11,8 @@ public class DatabaseTest {
 
     @Test
     public void testInsertAndLookupByName() {
-        Database db = new Database("jdbc:sqlite:identity.db");
+        Database db = new Database("jdbc:sqlite:identity-5156.db");
+        db.setUp();
         UserGenerator.Initialize();
         int numUsers = 100;
         ArrayList<User> users = new ArrayList<>();
@@ -34,7 +35,7 @@ public class DatabaseTest {
 
     @Test
     public void testInsertAndLookupByUUID() {
-        Database db = new Database("jdbc:sqlite:identity.db");
+        Database db = new Database("jdbc:sqlite:identity-5156.db");
         UserGenerator.Initialize();
         int numUsers = 100;
         ArrayList<User> users = new ArrayList<>();
@@ -55,6 +56,22 @@ public class DatabaseTest {
         db.close();
     }
 
-
+//    @Test
+//    public void testTimeStampTable() {
+//        Database db = new Database("jdbc:sqlite:identity.db");
+//        db.setLogicalStamp(2);
+//        assertEquals(2, db.getLogicalStamp().toString());
+//        db.setLogicalStamp(5);
+//        assertEquals(5, db.getLogicalStamp().toString());
+//    }
+//
+//    @Test
+//    public void testLogicalTimeStamp(){
+//        Database db = new Database("jdbc:sqlite:identity.db");
+//        db.setLogicalStamp(1);
+//        assertEquals(1, db.getLogicalStamp());
+//        db.setLogicalStamp(21);
+//        assertEquals(21, db.getLogicalStamp());
+//    }
 
 }

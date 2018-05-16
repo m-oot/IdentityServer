@@ -9,15 +9,10 @@ import org.kohsuke.args4j.Option;
 
 import javax.rmi.ssl.SslRMIClientSocketFactory;
 import javax.rmi.ssl.SslRMIServerSocketFactory;
-import java.io.File;
-import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.OutputStreamWriter;
 import java.lang.Thread;
-import java.lang.reflect.Array;
 import java.net.*;
 import java.rmi.NotBoundException;
-import java.rmi.Remote;
 import java.rmi.RemoteException;
 import java.rmi.server.*;
 import java.rmi.registry.*;
@@ -27,7 +22,6 @@ import java.util.*;
 import static Identity.Client.SHA2.trySHA;
 import static Identity.Server.CommitState.State.*;
 import static java.rmi.server.RemoteServer.getClientHost;
-import static org.kohsuke.args4j.ExampleMode.ALL;
 import static Identity.Server.Action.Type.*;
 
 /**
@@ -56,29 +50,28 @@ public class IdServer implements IdentityServerClusterInterface
     @Argument     // receives other command line parameters than options
     private List<String> arguments = new ArrayList<String>();
 
-    private int serverId;
+    private int serverId;                                           //This servers ID
     private CommitState currentCommitState = new CommitState();
-    private List<ServerInfo> liveServerInfo;
-    private List<Action> actionHistory;
-    private int lStamp; //current lamport timestamp
-    private int lastSynchronization = -1;
-    private ServerInfo coordinator;
-    private ServerInfo myInfo;
-    private boolean amCoordinator; //Set true if this server is the coordinator, otherwise false
-    private int nextID = 1;
-    private String databaseUrl;
+    private List<ServerInfo> liveServerInfo;                        //Server info for each server in the KnownServers.txt file
+    private List<Action> actionHistory;                             //A list of recently committed actions
+    private int lStamp;                                             //current lamport timestamp
+    private int lastSynchronization = -1;                           //The last known synchronization with other servers
+    private ServerInfo coordinator;                                 //Server Information for the coordinator
+    private ServerInfo myInfo;                                      //Server Information for this server
+    private boolean amCoordinator;                                  //Set true if this server is the coordinator, otherwise false
+    private int nextID = 1;                                         //The next available server ID.
+    private String databaseUrl;                                     //A file extention to be used to distinguish different databases
+    private static String databaseUrlPrefix = "jdbc:sqlite:";
     private DatabaseManager dm;
     private Logger log;
     private String verboseChannel = "verbose";
     private String eventChannel = "event";
 
-    private static String databaseUrlPrefix = "jdbc:sqlite:";
-    private static int syncDelay = 1000;
-    private static int heartBeatDelay = 2000;
-    private Action actionForCommit;
+    private static int heartBeatDelay = 2000;                       //Amount of time in milliseconds between each heart beat
+    private Action actionForCommit;                                 //The current action that is the candidate for commiting
 
     /**
-     * Starts the server
+     * main method
      * ==============================================================
      * ==============================================================
      */
@@ -88,8 +81,9 @@ public class IdServer implements IdentityServerClusterInterface
         System.setProperty("javax.net.ssl.keyStorePassword", "test123");
         System.setProperty("javax.net.ssl.trustStore", "Security/Client_Truststore");
         System.setProperty("java.security.policy", "Security/mysecurity.policy");
+        System.setProperty("java.rmi.server.hostname", "127.0.0.1"); //Only use when testing on localhost
         try {
-            IdServer server = new IdServer(args);
+            IdServer server = new IdServer(args); //The constructor handles everything
         } catch (Exception e) {
             e.printStackTrace();
             System.out.println("Exception occurred: " + e);
@@ -98,11 +92,11 @@ public class IdServer implements IdentityServerClusterInterface
 
 
     /**
-     * Default constructor
+     * IdServer constructor
      */
     public IdServer(String[] args) {
         run(args); //Parses command line arguments
-        Random rand = new Random();
+
         //Setting up DataBase
         if(dbFileName == null) {
             databaseUrl = databaseUrlPrefix + "identity-" + this.registryPort + ".db";
@@ -110,18 +104,20 @@ public class IdServer implements IdentityServerClusterInterface
             databaseUrl = databaseUrlPrefix + dbFileName;
         }
         dm = new DatabaseManager(databaseUrl);
-        if(dbFileName == null) dm.setUp();
-        log = new Logger();
+        if(dbFileName == null) dm.setUp(); //A null dbFileName indicates that the database has never been setup
+
         liveServerInfo = Collections.synchronizedList(new ArrayList<>());
         actionHistory = Collections.synchronizedList(new ArrayList<>());
-        lastSynchronization = dm.getLogicalStamp();
+
+        //Getting values from the database
+        lastSynchronization = dm.getLogicalStamp(); //Get the last known synchronization from the database
         lStamp = lastSynchronization;
         serverId = dm.getServerID();
-        System.out.println(dm.getCommitState());
         currentCommitState.setCurrentState(dm.getCommitState());
-        log.log(verboseChannel, "Current commit state: " + currentCommitState.getCurrentState());
-        Runtime.getRuntime().addShutdownHook(new ShutdownHook());   //Shuts down server properly
 
+        //Other set up
+        Runtime.getRuntime().addShutdownHook(new ShutdownHook());   //Shuts down server properly
+        log = new Logger();
         log.addChannel(verboseChannel,null);
         log.addChannel(eventChannel,System.out);
         if(debugServerHost != null && debugServerPort != -1) log.addServerChannel(verboseChannel,debugServerHost,debugServerPort);
@@ -130,16 +126,13 @@ public class IdServer implements IdentityServerClusterInterface
             log.addStream(verboseChannel,System.out);
             log.log(verboseChannel,"Verbose set");
         }
-        if(killServerDelay > 0) {
-            log.log(eventChannel,"Killing server in " + killServerDelay + " milliseconds");
-            this.kill(killServerDelay);
-        }
+
         getKnownServers();
     }
 
     /**
      * ===================================================
-     *Runs the server
+     *Parses command line arguments using Args4j
      * ===================================================
      */
     private void run(String[] args) {
@@ -159,42 +152,11 @@ public class IdServer implements IdentityServerClusterInterface
         }
     }
 
-    private void kill(long delayMilliseconds) {
-        class KillTask extends TimerTask {
-            public void run() {
-                System.exit(1);
-            }
-        }
-        Timer timer = new Timer();
-        timer.schedule(new KillTask(),delayMilliseconds);
-    }
-
-    /**
-     * Finds the most recently updated user in a list
-     * @param users
-     * @return
-     */
-    private User findMostRecentlyUpdatedUser(List<User> users) {
-        User mostRecentlyUpdatedUser = users.get(0);
-        for(User u : users) {
-            if(u.getLstamp() > mostRecentlyUpdatedUser.getLstamp()) {
-                mostRecentlyUpdatedUser = u;
-            }
-        }
-        return mostRecentlyUpdatedUser;
-    }
-
     /**
      * =======================================
-     * RMI methods
+     * RMI client methods
      * =======================================
      */
-    @Override
-    public void kill() throws RemoteException {
-        log.log(verboseChannel,"Killed by client");
-        System.exit(0);
-    }
-
     @Override
     public synchronized User create(String loginName, String realName, String password) throws RemoteException, PartitionedException {
         log.log(verboseChannel,getTimeStamp() + "attempting to create new user: " + loginName);
@@ -309,7 +271,6 @@ public class IdServer implements IdentityServerClusterInterface
         for(String s : strings) {
             System.out.println(s);
         }
-        User user = findMostRecentlyUpdatedUser(users);
         return strings;
     }
 
@@ -319,32 +280,8 @@ public class IdServer implements IdentityServerClusterInterface
     }
 
     /**
-     * Returns the current time in a printable format
-     * @return
-     */
-    private String getTimeStamp(){
-        return "[" + new SimpleDateFormat("MM/dd: HH.mm.ss").format(new Date()) + "] ";
-    }
-
-    /**
-     * Used to create thread safe access to lstamp
-     * @return
-     */
-    private synchronized int nextLamportTime() {
-        lStamp++;
-        return lStamp;
-    }
-
-    /**
-     * updates the lamport time stamp
-     */
-    private synchronized int setLamportTime(int lStamp){
-        return this.lStamp = lStamp;
-    }
-
-    /**
      *====================================================================
-     * Election RMI calls
+     * Election RMI methods
      * ===================================================================
      */
     @Override
@@ -418,6 +355,10 @@ public class IdServer implements IdentityServerClusterInterface
         return true;
     }
 
+    /**
+     *=========================================================================
+     * ========================================================================
+     */
     @Override
     public ArrayList<ServerInfo> getLiveServers() throws RemoteException {
         ArrayList<ServerInfo> liveServerInfoCopy = new ArrayList<>(liveServerInfo);
@@ -482,6 +423,18 @@ public class IdServer implements IdentityServerClusterInterface
         return lastSynchronization;
     }
 
+    @Override
+    public void announceNewServer(ServerInfo server) throws RemoteException {
+        try {
+            log.log(verboseChannel,"NEW SERVER: trying to connect with " + server);
+            server.setRemObj(getRemoteObject(server));
+            if(liveServerInfo.contains(server)) liveServerInfo.remove(server); //Removing old remote object
+            liveServerInfo.add(server);
+        } catch (NotBoundException e) {
+            log.log(verboseChannel,"Could not connect to new server: " + server.toString());
+        }
+    }
+
     /**
      *================================================================================
      * Two Phase Commit methods
@@ -529,6 +482,11 @@ public class IdServer implements IdentityServerClusterInterface
         dm.setCommitState(CommitState.stateToInt(COMMIT));
     }
 
+    /**
+     * Initiates a two phase commit
+     * @param currentActionRequest - The action that is currently a candidate for being committed
+     * @return 1 if successful, -1 not successful
+     */
     private int startTwoPhaseCommitPhaseOne(Action currentActionRequest){
         currentCommitState.setCurrentState(INIT);
         dm.setCommitState(CommitState.stateToInt(INIT));
@@ -572,6 +530,10 @@ public class IdServer implements IdentityServerClusterInterface
         return 1;
     }
 
+    /**
+     *Commits the action that was voted on during twoPhaseCommitPhaseOne
+     * @param currentActionRequest - The action that needs to be committed
+     */
     private void twoPhaseCommitPhaseTwo(Action currentActionRequest) {
         //Sending commit to all servers
         log.log(verboseChannel, "Commiting action: " + currentActionRequest.getStamp());
@@ -581,7 +543,7 @@ public class IdServer implements IdentityServerClusterInterface
                 server.getRemObj().commit();
             }
         } catch (RemoteException e) {
-            log.log(verboseChannel, "Problem with commiting action to backup servers. Aborting.");
+            log.log(verboseChannel, "Problem with committing action to backup servers.");
         }
         lStamp = currentActionRequest.getStamp();
         log.log(verboseChannel, "Commit made for action: " + currentActionRequest.getStamp());
@@ -639,6 +601,33 @@ public class IdServer implements IdentityServerClusterInterface
      * =============================================================================================
      */
 
+    /**
+     * Returns the current time in a printable format
+     * @return
+     */
+    private String getTimeStamp(){
+        return "[" + new SimpleDateFormat("MM/dd: HH.mm.ss").format(new Date()) + "] ";
+    }
+
+    /**
+     * Used to create thread safe access to lstamp
+     * @return
+     */
+    private synchronized int nextLamportTime() {
+        lStamp++;
+        return lStamp;
+    }
+
+    /**
+     * updates the lamport time stamp
+     */
+    private synchronized int setLamportTime(int lStamp){
+        return this.lStamp = lStamp;
+    }
+
+    /**
+     * A heart beat thread that will check for a response from the coordinator every heartBeatDelay milliseconds
+     */
     private void startHeartBeat() {
         Timer timer = new Timer();
         class HeartBeat extends TimerTask {
@@ -659,18 +648,6 @@ public class IdServer implements IdentityServerClusterInterface
         }
         HeartBeat hb = new HeartBeat();
         timer.scheduleAtFixedRate(hb, 0, heartBeatDelay); //Schedules timer.run() to execute periodically
-    }
-
-    @Override
-    public void announceNewServer(ServerInfo server) throws RemoteException {
-        try {
-            log.log(verboseChannel,"NEW SERVER: trying to connect with " + server);
-            server.setRemObj(getRemoteObject(server));
-            if(liveServerInfo.contains(server)) liveServerInfo.remove(server); //Removing old remote object
-            liveServerInfo.add(server);
-        } catch (NotBoundException e) {
-            log.log(verboseChannel,"Could not connect to new server: " + server.toString());
-        }
     }
 
     /**
@@ -712,17 +689,26 @@ public class IdServer implements IdentityServerClusterInterface
         }
     }
 
+    /**
+     * Sets the information for this server
+     */
     private void setMyInfo(){
         //Setting Server info
         String myIpaddress = "";
         try {
             myIpaddress = InetAddress.getLocalHost().getHostAddress(); //If an exception is thrown here, our systems not going to work, we could fix it, but we haven't
+            myIpaddress = "127.0.0.1";
         } catch (UnknownHostException e) {
             e.printStackTrace();
         }
         myInfo = new ServerInfo(myIpaddress,registryPort);
     }
 
+    /**
+     * Finds the current coordinator
+     * @return the ServerInfo for the current coordinator
+     * @throws RemoteException
+     */
     private ServerInfo findCoordinator() throws RemoteException {
         //Getting list of servers from file
         ServerAddressParser fileParser = new ServerAddressParser("KnownServers.txt");
@@ -745,7 +731,7 @@ public class IdServer implements IdentityServerClusterInterface
     }
 
     /**
-     * Gets the remote object
+     * Gets the remote objects from the servers listed in KnownServers.txt
      */
     public void getKnownServers(){
 
@@ -789,10 +775,10 @@ public class IdServer implements IdentityServerClusterInterface
             } else{ //You have lost connection/died and need to reconnect
                 log.log(verboseChannel, "Rejoining cluster");
                 bind();
-                if(coordinator == null){
+                if(coordinator == null){ //You are the coordinator
                     coordinator = myInfo;
                     amCoordinator = true;
-                } else{
+                } else{ //You are not the coordinator
                     coordinator.setRemObj(getRemoteObject(coordinator));
                     liveServerInfo = coordinator.getRemObj().getLiveServers();
                     liveServerInfo.remove(myInfo);

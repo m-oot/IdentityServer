@@ -6,6 +6,9 @@ import java.io.Serializable;
 
 import static Identity.Server.Action.Type.*;
 
+/**
+ *
+ */
 public class Action implements Serializable {
     public enum Type {CREATE,DELETE,UPDATE}
     private Type type;
@@ -30,6 +33,7 @@ public class Action implements Serializable {
         if(type == UPDATE) {
             this.newName = (String)args[1];
         }
+        this.user.setLstamp(this.lamportStamp);
     }
 
     /**
@@ -39,15 +43,12 @@ public class Action implements Serializable {
      */
     public int execute(DatabaseManager dm) {
         if(this.type == CREATE) {
-            this.user.setLstamp(this.lamportStamp);
             return dm.createUser(this.user);
         }
         if (this.type == DELETE) {
-            this.user.setLstamp(this.lamportStamp);
             return dm.deleteUser(this.user.getName(),this.user.getPassHash(),this.lamportStamp);
         }
         if(this.type == UPDATE) {
-            this.user.setLstamp(this.lamportStamp);
             return dm.changeUserName(this.user.getName(),this.newName,this.user.getPassHash(),this.user.getLstamp());
         }
         return -1;

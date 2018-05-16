@@ -17,6 +17,10 @@ public class Database {
     String url = "";
     Logger log;
 
+    /**
+     * Database constructor
+     * @param url
+     */
     public Database(String url) {
         this.url = url;
         log = Logger.getLogger("logger");
@@ -25,11 +29,10 @@ public class Database {
     }
 
     /**
-     * Connect to a sample database
+     * Connects to the database
      */
     public void connect() {
         try {
-            // create a connection to the database
             Class.forName("org.sqlite.JDBC");
             conn = DriverManager.getConnection(url);
         } catch (SQLException e) {
@@ -89,19 +92,6 @@ public class Database {
         return 1;
     }
 
-    public int setCommitState(int state) {
-        try {
-            PreparedStatement stmt = conn.prepareStatement("update serverinfo set commitstate = ?;");
-            stmt.setInt(1,state);
-            stmt.execute();
-        } catch (SQLException e) {
-            e.printStackTrace();
-            log.severe("Error in setServerID:\n" + e.getStackTrace());
-            return -1;
-        }
-        return 1;
-    }
-
     /**
      * Gets the serverID
      * @return serverID, or -1 if no previous serverID
@@ -117,6 +107,24 @@ public class Database {
             log.severe("Error in getServerID:\n" + e.getStackTrace());
         }
         return serverID;
+    }
+
+    /**
+     * Sets the commit state
+     * @param state - The state you want saved to the database
+     * @return 1 if successful, -1 if not successful
+     */
+    public int setCommitState(int state) {
+        try {
+            PreparedStatement stmt = conn.prepareStatement("update serverinfo set commitstate = ?;");
+            stmt.setInt(1,state);
+            stmt.execute();
+        } catch (SQLException e) {
+            e.printStackTrace();
+            log.severe("Error in setServerID:\n" + e.getStackTrace());
+            return -1;
+        }
+        return 1;
     }
 
     /**
@@ -241,6 +249,7 @@ public class Database {
             stmt.setString(1,user.getName());
 
             ResultSet rs = stmt.executeQuery();//statement.executeQuery("select * from users where name = '" + username + "';");
+            //Checking if the user already exists
             if (rs.next()) {
                 if(rs.getInt("deleted") == 1) {
                     stmt = conn.prepareStatement("delete from users where name = ?");
